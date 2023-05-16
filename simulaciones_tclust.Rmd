@@ -1,0 +1,230 @@
+---
+title: "Simulaciones tclust"
+author: "Javier Crespo Guerrero"
+output: pdf_document
+---
+
+En este Notebook se realizan simulaciones para comparar la eficacia y eficiencia de distintos algoritmos de clustering robusto. Estas simulaciones se han paralelizado para una mayor eficiencia computacional.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Carga de funciones
+
+```{r, results='hide', warning=FALSE}
+source('C:/Users/javie/Documents/UNIVERSIDAD/TFGEstadistica/InformacionLuisAngel/codigo/tclust_simplif.R')
+library(tclust)
+library(mclust)
+library(robClus)
+library(parallel)
+library(ggplot2)
+```
+
+## Parámetros de la simulación
+
+Se definen una serie de parámetros para hacer las simulaciones:
+
+  - n: número de observaciones simuladas.
+  - algorithm: algoritmo a utilizar, 1 para el tclust hecho puramente en R, 2 para el tclust disponible en CRAN, 3 para el tclust.new simulando el que está en CRAN y 4 para el tclust.new con la nueva aproximación al problema.
+  - scenario: 1 para conjuntos esféricos próximos entre sí (con un factor de restricción asociado de 12) y 2 para datos elipticos (con un factor de restricción asociado de 100).
+  - K: número de grupos, 3 o 6.
+  - p: número de dimensiones, 2 para 2 dimensiones y 8 para 2 dimensiones de información y 6 de ruido.
+  - nstart: número de incializaciones aleatorias, 1000 o 4000.
+  - nsteps: número de pasos de concentración. Si el algoritmo es 3 o 4 se distribuyen entre niter1 y niter2.
+  - nkeep: número de observaciones a seleccionar en la fase 2 de tclust_nuevo. Se ignora si el algoritmo es 1 o 2.
+  - equal_weights: ¿Sabemos a priori que los clusters tienen mismo tamaño? Sólo se usará False.
+  - opt: método de asignación de los clusters. Sólo se usará "HARD".
+  - balanced: 1 si los clusters están balanceados, 2 si no lo están.
+  - seed: valor de la semilla aleatoria para reproductibilidad.
+
+Para cada ejecución consideraremos tres métricas:
+  - Tiempo: el tiempo de ejecución, en segundos.
+  - Error: el error de clasificación.
+  - Obj: el valor de la función objetivo.
+
+```{r}
+# Parametros
+n <- c(800)
+algorithm <- 1:4
+scenario <- 1:2
+k <- c(3, 6)
+p <- c(2)
+nstart <- c(100)
+nsteps <- c(20)
+nkeep <- c(5)
+equal_weights <- c(FALSE)
+opt <- c("HARD")
+balanced <- c(1)
+
+# Numero de repeticiones de cada experimento base
+b <- 20
+
+# Semilla aleatoria
+seed <- 1:b
+
+# Metricas
+time <- c(NA)
+error <- c(NA)
+obj <- c(NA)
+
+results <- expand.grid(n, algorithm, scenario, k, p, nstart, nsteps, nkeep, equal_weights, opt, balanced, seed, time, error, obj)
+colnames(results) <- c("n", "algorithm", "scenario", "k", "p", "nstart", "nsteps", "nkeep", "equal_weights", "opt", "balanced", "seed", "time", "error", "obj")
+head(results)
+```
+
+## Función de simulación
+
+```{r, message=FALSE}
+make_simulation <- function(simulation_row){
+  n <- as.numeric(simulation_row["n"])
+  K <- as.numeric(simulation_row["k"])
+  p <- as.numeric(simulation_row["p"])
+  alpha <- 1/10
+  opt <- simulation_row["opt"]
+  scenario <- as.numeric(simulation_row["scenario"])
+  restr_fact <- ifelse(scenario == 1, 12, 100)
+  equal_weights <- as.logical(simulation_row["equal_weights"])
+  balanced <- as.numeric(simulation_row["balanced"])
+  algorithm <- as.numeric(simulation_row["algorithm"])
+  
+  set.seed(simulation_row["seed"])
+  
+  nstart <- as.numeric(simulation_row["nstart"])
+  nsteps <- as.numeric(simulation_row["nsteps"])
+  nkeep <- as.numeric(simulation_row["nkeep"])
+
+  data <- simula.tclust(n, p, K, type = scenario, balanced = balanced)
+  Y <- data$x
+  true_assig <- data$true
+  
+  set.seed(as.numeric(simulation_row["seed"]))
+  
+  if(algorithm == 1){ # tclust hecho en R
+    
+    start_time <- Sys.time()
+    best_iter <- tclust.simplif(
+      X = Y, K = K, alpha = alpha, nstart = nstart, cstep = nsteps,
+      opt = opt, equal.weights = equal_weights, restr.fact = restr_fact)
+    end_time <- Sys.time()
+    
+    simulation_row["time"] <- difftime(end_time, start_time, units="secs")
+    simulation_row["error"] <- classError(best_iter$assig, true_assig)$errorRate
+    simulation_row["obj"] <- best_iter$obj
+    
+  } else if(algorithm == 2){ # tclust del CRAN
+    
+    start_time <- Sys.time()
+    best_iter_CRAN <- tclust(
+      x = Y, k = K, alpha = alpha,
+      nstart = nstart, iter.max = nsteps, restr = "eigen", restr.fact = restr_fact, equal.weights = equal_weights, warnings = 0
+    )
+    end_time <- Sys.time()
+    
+    simulation_row["time"] <- difftime(end_time, start_time, units="secs")
+    simulation_row["error"] <- classError(best_iter_CRAN$cluster, true_assig)$errorRate
+    simulation_row["obj"] <- best_iter_CRAN$obj
+    
+  } else if(algorithm == 3){ # tclust nuevo simulando al del CRAN
+    
+    start_time <- Sys.time()
+    best_iter_simul <- tclust.new(
+      x = Y, k = K, alpha = alpha, nstart = nstart, niter1 = 3, niter2 = nsteps - 3, nkeep = nstart, # OJO, nkeep = nstart
+      opt = opt, equal.weights = equal_weights, restr.fact = restr_fact)
+    end_time <- Sys.time()
+    
+    simulation_row["time"] <- difftime(end_time, start_time, units="secs")
+    simulation_row["error"] <- classError(best_iter_simul$cluster, true_assig)$errorRate
+    simulation_row["obj"] <- best_iter_simul$obj
+    
+  } else { # tclust nuevo con nueva estrategia
+    
+    start_time <- Sys.time()
+    best_iter_new <- tclust.new(
+      x = Y, k = K, alpha = alpha, nstart = nstart, niter1 = 5, niter2 = nsteps, nkeep = nkeep,
+      opt = opt, equal.weights = equal_weights, restr.fact = restr_fact)
+    end_time <- Sys.time()
+    
+    simulation_row["time"] <- difftime(end_time, start_time, units="secs")
+    simulation_row["error"] <- classError(best_iter_new$cluster, true_assig)$errorRate
+    simulation_row["obj"] <- best_iter_new$obj
+    
+  }
+  
+  return(as.data.frame(as.list(simulation_row)))
+}
+```
+
+## Ejecución en paralelo
+
+```{r, results='hide'}
+n_cores <- detectCores()
+cl <- makeCluster(n_cores - 1)
+clusterEvalQ(cl, {
+  library("mclust")
+  library("Rcpp")
+  library("RcppArmadillo")
+  library("robClus")
+  library("tclust")
+  library("MASS")
+})
+clusterExport(cl, c("tclust.simplif", "calcobj", "dmnorm", "estimClustPar", "f.restr", "findClustAssig", "getini", "InitClusters", "restr2_eigenv", "ssclmat", "TreatSingularity"))
+results <- as.data.frame(do.call(rbind, parApply(cl, results, 1, make_simulation)))
+stopCluster(cl)
+
+# results <- as.data.frame(do.call(rbind, apply(results, 1, make_simulation)))
+# head(results)
+
+results$error <- as.numeric(results$error)
+results$obj <- as.numeric(results$obj)
+results$time <- as.numeric(results$time)
+results$nstart <- as.numeric(results$nstart)
+```
+
+```{r}
+write.csv(results, "C:/Users/javie/Documents/UNIVERSIDAD/TFGEstadistica/resultados_simulacion.csv", quote = F, row.names = F)
+```
+
+```{r}
+ggplot(results, aes(x=algorithm, y=time)) +
+  geom_boxplot()+
+  facet_grid(scenario ~ k)+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))+
+  labs(y = "Time", x= "Algorithm")
+
+ggplot(results, aes(x=algorithm, y=obj)) +
+  geom_boxplot()+
+  facet_grid(scenario ~ k)+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))+
+  labs(y = "Obj", x="Algorithm")
+
+ggplot(results, aes(x=algorithm, y=error)) +
+  geom_boxplot()+
+  facet_grid(scenario ~ k)+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))+
+  labs(y = "Error", x="Algorithm")
+```
+
+## Resultados para nstart = 400
+
+```{r}
+results_filtered = results[results$nstart == 400,]
+
+ggplot(results_filtered, aes(x=algorithm, y=time)) +
+  geom_boxplot()+
+  facet_grid(scenario ~ k)+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))+
+  labs(y = "Time", x= "Algorithm")
+
+ggplot(results_filtered, aes(x=algorithm, y=obj)) +
+  geom_boxplot()+
+  facet_grid(scenario ~ k)+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))+
+  labs(y = "Obj", x="Algorithm")
+
+ggplot(results_filtered, aes(x=algorithm, y=error)) +
+  geom_boxplot()+
+  facet_grid(scenario ~ k)+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))+
+  labs(y = "Error", x="Algorithm")
+```

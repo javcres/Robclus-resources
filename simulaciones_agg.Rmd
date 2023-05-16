@@ -1,0 +1,406 @@
+---
+title: "Simulaciones tclust"
+author: "Javier Crespo Guerrero"
+output: pdf_document
+---
+
+En este Notebook se realizan simulaciones para comparar la eficacia y eficiencia de distintas agregaciones de algoritmos de clustering robusto. Estas simulaciones se han paralelizado para una mayor eficiencia computacional.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Carga de funciones
+
+```{r, results='hide', warning=FALSE}
+library(mclust)
+library(robClus)
+library(parallel)
+library(ggplot2)
+```
+
+### Numero de repeticiones
+
+```{r}
+# Numero de repeticiones de cada experimento base
+b <- 20
+
+# Semilla aleatoria
+seed <- 1:b
+```
+
+# Simulacion para tclust
+
+## Parámetros de la simulación
+
+Se definen una serie de parámetros para hacer las simulaciones:
+
+-   n: número de observaciones simuladas.
+-   algorithm: algoritmo a utilizar, 1 metodo base, 2 para agregacion y 3 para metodo base con más inicializaciones/etapas.
+-   scenario: 1 para conjuntos esféricos próximos entre sí (con un factor de restricción asociado de 1) y 2 para datos elipticos (con un factor de restricción asociado de 81).
+-   K: número de grupos, 3 o 6.
+-   p: número de dimensiones, 4 para 2 dimensiones y 2 de ruido y 10 para 2 dimensiones de información y 8 de ruido.
+-   nstart: número de incializaciones aleatorias, 100.
+-   nsteps: número de pasos de concentración, 10. Se asignan todas a niter1, en niter2 sólo se hace 1 iteración.
+-   nsteps.c2: número de pasos de concentración tras la agregacion, 10. Se asignan todas a niter1, en niter2 sólo se hace 1 iteración.
+-   factor.nstart: factor por el que multiplicar nstart para hacer la comparación con el método base con más inicializaciones.
+-   factor.nteps: idem con nsteps.
+-   balanced: 1 si los clusters están balanceados, 2 si no lo están.
+-   seed: valor de la semilla aleatoria para reproductibilidad.
+
+Para cada ejecución consideraremos tres métricas: - Tiempo: el tiempo de ejecución, en segundos. - Error: el error de clasificación. - Obj: el valor de la función objetivo.
+
+Estas métricas se miden tanto para el método base como para el método agregado
+
+Se va a utilizar el método de Ward para el clustering jerárquico una vez se tienen las matrices de distancias.
+
+```{r}
+# Parametros
+n <- c(200, 500, 1000)
+algorithm <- 1:3
+scenario <- 1:2
+k <- c(3, 6)
+p <- c(4, 10)
+nstart <- c(100,400)
+nsteps <- c(20)
+nsteps.c2 <- c(20)
+factor.nstart <- c(5)
+factor.nsteps <- c(1)
+balanced <- c(1, 2)
+
+
+# Metricas
+time <- c(NA)
+error <- c(NA)
+obj <- c(NA)
+
+results <- expand.grid(n, algorithm, scenario, k, p, nstart, nsteps, nsteps.c2, factor.nstart, factor.nsteps, balanced, seed, time, error, obj  
+                       # base.time, base.error, base.obj, extended.time, extended.error, extended.obj
+                       )
+colnames(results) <- c("n", "algorithm", "scenario", "k", "p", "nstart", "nsteps", "nsteps.c2", "factor.nstart", "factor.nsteps", "balanced", "seed", "time", "error", "obj" 
+                       # "base.time", "base.error", "base.obj", "extended.time", "extended.error", "extended.obj"
+                       )
+head(results)
+```
+
+### Función de simulación
+
+```{r, message=FALSE}
+make_simulation_tclust <- function(simulation_row){
+  n <- as.numeric(simulation_row["n"])
+  k <- as.numeric(simulation_row["k"])
+  p <- as.numeric(simulation_row["p"])
+  alpha <- 0.1
+  opt <- "HARD"
+  scenario <- as.numeric(simulation_row["scenario"])
+  restr.fact <- ifelse(scenario == 1, 12, 100)
+  equal.weights <- FALSE
+  balanced <- as.numeric(simulation_row["balanced"])
+  algorithm <- as.numeric(simulation_row["algorithm"])
+  factor.nstart <- as.numeric(simulation_row["factor.nstart"])
+  factor.nsteps <- as.numeric(simulation_row["factor.nsteps"])
+  
+  nstart <- as.numeric(simulation_row["nstart"])
+  nsteps <- as.numeric(simulation_row["nsteps"])
+  nsteps.c2 <- as.numeric(simulation_row["nsteps.c2"])
+  nkeep <- 1
+  
+  set.seed(as.numeric(simulation_row["seed"]))
+  
+  data <- simula.tclust(n=n, type=scenario, k=k, p=p, balanced=balanced)
+  x <- data$x
+  true_assig <- data$true
+  
+  if(algorithm == 1){ # tclust.new agregado
+    start_time <- Sys.time()
+    tc <- tclust.new(
+      x = x, k = k, alpha=alpha, nstart = nstart, niter1 = nsteps, niter2 = 1, nkeep = 1,
+      opt = opt, equal.weights = equal.weights, restr.fact = restr.fact)
+    end_time <- Sys.time()
+    
+    simulation_row["time"] <- difftime(end_time, start_time, units="secs")
+    simulation_row["error"] <- classError(tc$cluster, true_assig)$errorRate
+    simulation_row["obj"] <- tc$obj
+    
+  } else if(algorithm == 2){ # metodo agregado
+    start_time <- Sys.time()
+    
+    tc <- tclust.new(
+      x = x, k = k, alpha=alpha, nstart = nstart, niter1 = nsteps, niter2 = 1, nkeep = 1,
+      opt = opt, equal.weights = equal.weights, restr.fact = restr.fact)
+    
+    affin <- matrix(rep(0,n^2),nrow=n) 
+  
+    for(b in 1:nstart){
+      cl <- tc$cluster.ini[b,]
+      A <- matrix(rep(0,n^2),nrow=n)
+      for(i in which(cl > 0)){
+        A[,i] <- 1*(cl == cl[i])
+      }
+      affin <- affin + A
+    }
+
+    sums <-apply(affin,1,sum)
+    no.trim <- which(sums>sort(sums)[floor(n*alpha)])
+    cc.tenta <- rep(0,n)
+    cc.tenta[no.trim] <- cutree(hclust(1 - as.dist(affin[no.trim, no.trim] / max(affin)), method = "ward.D2"), k)
+    
+    tc.ag <- tclust_c2(x=x, k=k, alpha, cluster=cc.tenta, restr_fact=restr.fact, niter=nsteps.c2)
+    end_time <- Sys.time()
+    
+    simulation_row["time"] <- difftime(end_time, start_time, units="secs")
+    simulation_row["error"] <- classError(tc.ag$cluster, true_assig)$errorRate
+    simulation_row["obj"] <- tc.ag$obj
+
+  } else { # Metodo base con mas inicializaciones/etapas de concentracion
+    start_time <- Sys.time()
+    extended.tc <- tclust.new(
+      x = x, k = k, alpha=alpha, nstart = factor.nstart * nstart, niter1 = factor.nsteps * nsteps, niter2 = 1, nkeep = 1,
+      opt = opt, equal.weights = equal.weights, restr.fact = restr.fact)
+    end_time <- Sys.time()
+    
+    simulation_row["time"] <- difftime(end_time, start_time, units="secs")
+    simulation_row["error"] <- classError(extended.tc$cluster, true_assig)$errorRate
+    simulation_row["obj"] <- extended.tc$obj
+  }
+  
+  return(as.data.frame(as.list(simulation_row)))
+}
+```
+
+### Ejecución en paralelo
+
+```{r, results='hide'}
+n_cores <- detectCores()
+cl <- makeCluster(n_cores - 3)
+clusterEvalQ(cl, {
+  library("mclust")
+  library("robClus")
+})
+results <- as.data.frame(do.call(rbind, parApply(cl, results, 1, make_simulation_tclust)))
+stopCluster(cl)
+
+# Para correr sin paralelización
+#results <- as.data.frame(do.call(rbind, apply(results, 1, make_simulation_tclust)))
+#head(results)
+
+results <- as.data.frame(apply(results, 2, as.numeric))
+results$algorithm <- as.factor(results$algorithm)
+```
+
+```{r}
+write.csv(results, "C:/Users/langel/OneDrive - UVa/luis/KPMEDIAS/CODIGO_/tclust_crespo/resultados_simulacion_tclust_agg.csv", quote = F, row.names = F)
+```
+
+```         
+```
+
+```{r}
+cat("n:")
+levels(as.factor(results$n))
+cat("p:")
+levels(as.factor(results$p))
+cat("k:")
+levels(as.factor(results$k))
+cat("scenario:")
+levels(as.factor(results$scenario))
+cat("balanced:")
+levels(as.factor(results$balanced))
+cat("nstart:")
+levels(as.factor(results$nstart))
+
+```
+
+### Resultados filtrados...
+
+```{r}
+results_filtered = results[results$n=="1000" &
+        results$p=="10" &
+        results$balanced=="1" &
+        results$nstart=="400",]
+
+ggplot(results_filtered, aes(x=algorithm, y=time)) +
+  geom_boxplot()+
+  facet_grid(scenario ~ k)+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))+
+  labs(y = "Time", x= "Algorithm")
+
+ggplot(results_filtered, aes(x=algorithm, y=obj)) +
+  geom_boxplot()+
+  facet_grid(scenario ~ k)+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))+
+  labs(y = "Obj", x="Algorithm")
+
+ggplot(results_filtered, aes(x=algorithm, y=error)) +
+  geom_boxplot()+
+  facet_grid(scenario ~ k)+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))+
+  labs(y = "Error", x="Algorithm")
+```
+
+# Simulaciones para la funcion rlg
+
+### Parametros
+
+```{r}
+# Parametros (solo los extras y los que cambian, el resto se quedan como estaban)
+n <- c(150,400)
+p <- c(200)
+q <- c(5)
+algorithm <- 1:3
+var <- c(0.01)
+sep.means <- 0
+k <- c(3)
+nstart <- c(100,400)
+nsteps <- c(20)
+nsteps.c2 <- c(20)
+factor.nstart <- c(5)
+factor.nsteps <- c(1)
+
+# Metricas
+time <- c(NA)
+error <- c(NA)
+obj <- c(NA)
+
+results <- expand.grid(n, algorithm, scenario, k, p, q, var, sep.means, nstart, nsteps, nsteps.c2, factor.nstart, factor.nsteps, balanced, seed, time, error, obj)
+colnames(results) <- c("n", "algorithm", "scenario", "k", "p", "q", "var", "sep.means", "nstart", "nsteps", "nsteps.c2", "factor.nstart", "factor.nsteps", "balanced", "seed", "time", "error", "obj")
+head(results)
+```
+
+### Funcion de simulacion
+
+```{r, message=FALSE}
+make_simulation_rlg <- function(simulation_row){
+  
+  n <- as.numeric(simulation_row["n"])
+  k <- as.numeric(simulation_row["k"])
+  p <- as.numeric(simulation_row["p"])
+  q <- as.numeric(simulation_row["q"])
+  d <- rep(q, k)
+  var <- as.numeric(simulation_row["var"])
+  sep.means <- as.numeric(simulation_row["sep.means"])
+
+  alpha <- 0.1
+  scenario <- as.numeric(simulation_row["scenario"])
+  balanced <- as.numeric(simulation_row["balanced"])
+  algorithm <- as.numeric(simulation_row["algorithm"])
+  factor.nstart <- as.numeric(simulation_row["factor.nstart"])
+  factor.nsteps <- as.numeric(simulation_row["factor.nsteps"])
+  
+  nstart <- as.numeric(simulation_row["nstart"])
+  nsteps <- as.numeric(simulation_row["nsteps"])
+  nsteps.c2 <- as.numeric(simulation_row["nsteps.c2"])
+  nkeep <- 1
+  
+  set.seed(as.numeric(simulation_row["seed"]))
+  
+  data <- simula.rlg(p = p, n = n, var = var, sep.means = sep.means, alpha = alpha)
+  x <- data$x
+  true_assig <- data$true
+  
+  if(algorithm == 1){ # tclust.new agregado
+    start_time <- Sys.time()
+    tc <- rlg(x=x, d = d, alpha=alpha, nstart = nstart, niter1 = nsteps, niter2 = 1, nkeep = 1)
+    end_time <- Sys.time()
+    
+    simulation_row["time"] <- difftime(end_time, start_time, units="secs")
+    simulation_row["error"] <- classError(tc$cluster, true_assig)$errorRate
+    simulation_row["obj"] <- tc$obj
+    
+  } else if(algorithm == 2){ # metodo agregado
+    start_time <- Sys.time()
+    
+    tc <- rlg(x=x, d = d, alpha=alpha, nstart = nstart, niter1 = nsteps, niter2 = 1, nkeep = 1)
+    
+    affin <- matrix(rep(0,n^2),nrow=n) 
+  
+    for(b in 1:nstart){
+      cl <- tc$cluster.ini[b,]
+      A <- matrix(rep(0,n^2),nrow=n)
+      for(i in which(cl > 0)){
+        A[,i] <- 1*(cl == cl[i])
+      }
+      affin <- affin + A
+    }
+
+    sums <-apply(affin,1,sum)
+    no.trim <- which(sums>sort(sums)[floor(n*alpha)])
+    cc.tenta <- rep(0,n)
+    cc.tenta[no.trim] <- cutree(hclust(1 - as.dist(affin[no.trim, no.trim] / max(affin)), method = "ward.D2"), k)
+    
+    tc.ag <- rlg_c2(x = x, d = d, alpha=alpha, cluster = cc.tenta, niter2 = nsteps.c2)
+    end_time <- Sys.time()
+    
+    simulation_row["time"] <- difftime(end_time, start_time, units="secs")
+    simulation_row["error"] <- classError(tc.ag$cluster, true_assig)$errorRate
+    simulation_row["obj"] <- tc.ag$obj
+
+  } else { # Metodo base con mas inicializaciones/etapas de concentracion
+    start_time <- Sys.time()
+    extended.tc <- rlg(x=x, d = d, alpha=alpha, nstart = factor.nstart * nstart, niter1 = factor.nsteps * nsteps, niter2 = 1, nkeep = 1)
+    end_time <- Sys.time()
+    
+    simulation_row["time"] <- difftime(end_time, start_time, units="secs")
+    simulation_row["error"] <- classError(extended.tc$cluster, true_assig)$errorRate
+    simulation_row["obj"] <- extended.tc$obj
+  }
+  
+  return(as.data.frame(as.list(simulation_row)))
+}
+```
+
+```{r, results='hide'}
+n_cores <- detectCores()
+cl <- makeCluster(n_cores - 3)
+clusterEvalQ(cl, {
+  library("mclust")
+  library("robClus")
+ })
+results <- as.data.frame(do.call(rbind, parApply(cl, results, 1, make_simulation_rlg)))
+stopCluster(cl)
+
+ # results <- as.data.frame(do.call(rbind, apply(results, 1, make_simulation_rlg)))
+ # head(results)
+
+results <- as.data.frame(apply(results, 2, as.numeric))
+results$algorithm <- as.factor(results$algorithm)
+```
+
+```{r}
+write.csv(results, "C:/Users/langel/OneDrive - UVa/luis/KPMEDIAS/CODIGO_/tclust_crespo/resultados_simulacion_rlg_agg.csv", quote = F, row.names = F)
+```
+
+```{r}
+ggplot(results, aes(x=algorithm, y=time)) +
+  geom_boxplot()+
+  facet_grid(scenario ~ k)+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))+
+  labs(y = "Time", x= "Algorithm")
+
+ggplot(results, aes(x=algorithm, y=obj)) +
+  geom_boxplot()+
+  facet_grid(scenario ~ k)+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))+
+  labs(y = "Obj", x="Algorithm")
+
+ggplot(results, aes(x=algorithm, y=error)) +
+  geom_boxplot()+
+  facet_grid(scenario ~ k)+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))+
+  labs(y = "Error", x="Algorithm")
+```
+
+```{r}
+cat("n:")
+levels(as.factor(results$n))
+cat("p:")
+levels(as.factor(results$p))
+cat("k:")
+levels(as.factor(results$k))
+cat("scenario:")
+levels(as.factor(results$scenario))
+cat("balanced:")
+levels(as.factor(results$balanced))
+cat("nstart:")
+levels(as.factor(results$nstart))
+```

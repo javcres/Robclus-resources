@@ -1,0 +1,358 @@
+---
+title: "Aplicación de robClus a un caso real"
+author: "Javier Crespo Guerrero"
+date: "8/5/2023"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Este cuaderno muestra una aplicación del paquete robClus a un caso real: la detección de dígitos escritos a mano. Para ello se utilizará el datset usps358, un subconjunto del conocido dataset MNIST que reduce los dígitos a 3, 5 y 8, los más difíciles de detectar y más similares entre ellos.
+
+## Carga de bibliotecas
+
+```{r, message = FALSE}
+library(MBCbook)
+library(robClus)
+library(mclust)
+library(tclust)
+library(doParallel)
+```
+
+## Carga de datos
+
+```{r}
+data(usps358)
+data <- as.matrix(usps358[,-1])
+label <- usps358[,1]
+```
+
+```{r}
+par(mfrow = c(1,3))
+image(t(matrix(data[1,],ncol=16,byrow=TRUE)[16:1,]))
+image(t(matrix(data[701,],ncol=16,byrow=TRUE)[16:1,]))
+image(t(matrix(data[1531,],ncol=16,byrow=TRUE)[16:1,]))
+par(mfrow = c(1,1))
+```
+
+## Justificación de uso de robClus
+
+En el dataset hay presentes dígitos difícilmente reconocibles de forma manual, por lo que bien los podríamos considerar puntos de "ruido", por lo que tiene sentido abordar este problema con un método de recorte. A continuación se muestran algunos ejemplos de dígitos "ruido".
+
+```{r}
+index_0 <- which(clus$cluster == 0)
+par(mfrow=c(2,2))
+image(t(matrix(data[index_0[1],],ncol=16,byrow=TRUE)[16:1,]))
+image(t(matrix(data[index_0[7],],ncol=16,byrow=TRUE)[16:1,]))
+image(t(matrix(data[index_0[10],],ncol=16,byrow=TRUE)[16:1,]))
+image(t(matrix(data[index_0[18],],ncol=16,byrow=TRUE)[16:1,]))
+par(mfrow=c(1,1))
+```
+
+## Determinación de parámetros óptimos
+
+Necesitamos determinar el valor óptimo de 3 parámetros: alpha, restr.fact y d. Vamos a hacerlo por el método de ensayo y error buscando aquellos que minimicen el error.
+
+```{r}
+nstart <- 1000
+
+# Determinación del alpha optimo, ensayo y error
+# Usamos un valor tentativo de restr.fact y luego hallamos el restr.fact optimo
+alpha.grid <- seq(0.001, 0.15, length.out=40)
+errores <- c()
+for(alpha in alpha.grid){
+  start_time <- Sys.time()
+  clus <- tclust.new(data, k=3, alpha=alpha, nstart = nstart, parallel = T, restr.fact = 1)
+  end_time <- Sys.time()
+  error.clus <- classError(clus$cluster, label)$errorRate
+  print(paste("Alpha:",alpha,"error:",error.clus,"tiempo (min):",difftime(end_time, start_time, units="min")))
+  errores <- c(errores, error.clus)
+}
+
+alpha.best <- alpha.grid[which.min(errores)] 
+plot(alpha.grid, errores, type="l", xlab = "alpha", ylab="Error clasificación", main="Búsqueda alpha óptimo")
+abline(v = alpha.best, col="blue", lty = "dashed")
+
+# Determinación del restr.fact optimo, ensayo y error
+restr.fact.grid <- seq(0.1, 10, length.out=40)
+errores <- c()
+for(restr.fact in restr.fact.grid){
+  start_time <- Sys.time()
+  clus <- tclust.new(data, k=3, alpha=alpha.best, nstart = nstart, parallel = T, restr.fact = restr.fact)
+  end_time <- Sys.time()
+  error.clus <- classError(clus$cluster, label)$errorRate
+  print(paste("Restr.fact:",restr.fact,"error:",error.clus,"tiempo (min):",difftime(end_time, start_time, units="min")))
+  errores <- c(errores, error.clus)
+}
+restr.fact.best <- restr.fact.grid[which.min(errores)] 
+plot(restr.fact.grid, errores, type="l", xlab = "restr.fact", ylab="Error clasificación", main="Búsqueda restr.fact óptimo")
+abline(v = restr.fact.best, col="blue", lty = "dashed")
+
+# Determinación del d optimo, ensayo y error
+d.grid <- 1:7
+errores <- c()
+for(d in d.grid){
+  start_time <- Sys.time()
+  clus <- rlg(data, rep(d, 3), alpha=alpha.best, nstart = nstart, parallel = T)
+  end_time <- Sys.time()
+  error.clus <- classError(clus$cluster, label)$errorRate
+  print(paste("d:",d,"error:",error.clus,"tiempo (min):",difftime(end_time, start_time, units="min")))
+  errores <- c(errores, error.clus)
+}
+d.best <- d.grid[which.min(errores)] 
+plot(d.grid, errores, type="l", xlab = "d", ylab="Error clasificación", main="Búsqueda d óptimo")
+abline(v = d.best, col="blue", lty = "dashed")
+```
+
+Vamos a utilizar alpha = 0.05 y restr.fact = 4 para el algoritmo tclust y d = c(4, 4, 4) para rlg.
+
+## Comparacion de algoritmos
+
+Una vez hallados los parámetros óptimos, vamos a comparar los resultados en tiempo, función objetivo y error de clasificación.
+
+**Tclust**
+
+```{r}
+start_time <- Sys.time()
+res.tclust <- tclust(data, k=3, alpha=0.05, restr.fact = 4, nstart = 10)
+end_time <- Sys.time()
+paste("tclust, tiempo: ", difftime(end_time, start_time, units="min"),
+      "error:", classError(res.tclust$cluster, label)$errorRate,
+      "funcion objetivo:", res.tclust$obj)
+```
+
+**Tclust.new sin paralelizar**
+
+```{r}
+start_time <- Sys.time()
+res.tclust.new <- tclust.new(data, k=3, alpha=0.05, restr.fact = 4, nstart = 1000)
+end_time <- Sys.time()
+paste("tclust.new base, tiempo: ", difftime(end_time, start_time, units="min"),
+      "error:", classError(res.tclust.new$cluster, label)$errorRate,
+      "funcion objetivo:", res.tclust.new$obj)
+```
+
+**Tclust.new paralelizado**
+
+```{r}
+start_time <- Sys.time()
+res.tclust.new.par <- tclust.new(data, k=3, alpha=0.05, restr.fact = 4, nstart = 1000, parallel = T)
+end_time <- Sys.time()
+paste("tclust.new paralelizado, tiempo: ", difftime(end_time, start_time, units="min"),
+      "error:", classError(res.tclust.new.par$cluster, label)$errorRate,
+      "funcion objetivo:", res.tclust.new.par$obj)
+```
+
+**Tclust.new con agregacion**
+
+```{r}
+n <- nrow(data)
+
+start_time <- Sys.time()
+tc <- tclust.new(data, k=3, alpha=0.05, restr.fact = 4, nstart = 1000, parallel = T)
+
+affin <- matrix(rep(0,n^2),nrow=n) 
+  
+for(b in 1:1000){
+  cl <- tc$cluster.ini[b,]
+  A <- matrix(rep(0,n^2),nrow=n)
+  for(i in which(cl > 0)){
+    A[,i] <- 1*(cl == cl[i])
+  }
+  affin <- affin + A
+}
+
+sums <-apply(affin,1,sum)
+no.trim <- which(sums>sort(sums)[floor(n*0.05)])
+cc.tenta <- rep(0,n)
+cc.tenta[no.trim] <- cutree(hclust(1 - as.dist(affin[no.trim, no.trim] / max(affin)), method = "ward.D2"), 3)
+
+tc.ag <- tclust_c2(x=data, k=3, alpha=0.05, cluster=cc.tenta, restr_fact=4, n)
+
+end_time <- Sys.time()
+paste("tclust.new agregado, tiempo: ", difftime(end_time, start_time, units="min"),
+      "error:", classError(tc.ag$cluster, label)$errorRate,
+      "funcion objetivo:", tc.ag$obj)
+```
+
+**Rlg sin paralelizar**
+
+```{r}
+start_time <- Sys.time()
+res.rlg <- rlg(data, k=3, alpha=0.05, d = c(4, 4, 4), nstart = 1000)
+end_time <- Sys.time()
+paste("rlg base, tiempo: ", difftime(end_time, start_time, units="min"),
+      "error:", classError(res.rlg$cluster, label)$errorRate,
+      "funcion objetivo:", res.rlg$obj)
+```
+
+**Rlg paralelizado**
+
+```{r}
+start_time <- Sys.time()
+res.rlg.par <- rlg(data, alpha=0.05, d = c(4, 4, 4), nstart = 1000, parallel = T)
+end_time <- Sys.time()
+paste("rlg paralelizado, tiempo: ", difftime(end_time, start_time, units="min"),
+      "error:", classError(res.rlg.par$cluster, label)$errorRate,
+      "funcion objetivo:", res.rlg.par$obj)
+```
+
+**Rlg con agregacion**
+
+```{r}
+n <- nrow(data)
+
+start_time <- Sys.time()
+tc <- rlg(data, alpha=0.05, d = c(4, 4, 4), nstart = 1000, parallel = T)
+
+affin <- matrix(rep(0,n^2),nrow=n) 
+  
+for(b in 1:1000){
+  cl <- tc$cluster.ini[b,]
+  A <- matrix(rep(0,n^2),nrow=n)
+  for(i in which(cl > 0)){
+    A[,i] <- 1*(cl == cl[i])
+  }
+  affin <- affin + A
+}
+
+sums <-apply(affin,1,sum)
+no.trim <- which(sums>sort(sums)[floor(n*0.05)])
+cc.tenta <- rep(0,n)
+cc.tenta[no.trim] <- cutree(hclust(1 - as.dist(affin[no.trim, no.trim] / max(affin)), method = "ward.D2"), 3)
+
+tc.ag <- rlg_c2(x = data, d = c(4, 4, 4), alpha=0.05, cluster = cc.tenta)
+
+end_time <- Sys.time()
+paste("rlg agregado, tiempo: ", difftime(end_time, start_time, units="min"),
+      "error:", classError(tc.ag$cluster, label)$errorRate,
+      "funcion objetivo:", tc.ag$obj)
+```
+
+## Analisis de resultados
+
+### TCLUST
+
+```{r}
+set.seed(2023)
+clus <- tclust.new(data,k=3,alpha=0.05, restr.fact = 4, nstart = 1000, parallel = T)
+```
+
+Grid de resultados bien clasificados
+
+```{r}
+classError(clus$cluster, label)$errorRate
+```
+
+```{r}
+table(clus$cluster, label)
+```
+
+Algunos resultados bien clasificados
+
+```{r}
+par(mfrow = c(3,3))
+for(i in 1:3){
+  for(j in 1:3){
+    observation <- which(clus$cluster == i & clus$cluster==label)[j]
+    image(t(matrix(data[observation,],ncol=16,byrow=TRUE)[16:1,]))
+  }
+}
+par(mfrow = c(1,1))
+```
+
+Algunos resultados de ruido
+
+```{r}
+par(mfrow = c(1,3))
+for(j in c(12, 23, 65)){
+  observation <- which(clus$cluster == 0)[j]
+  image(t(matrix(data[observation,],ncol=16,byrow=TRUE)[16:1,]))
+}
+par(mfrow = c(1,1))
+```
+
+### RLG
+
+```{r}
+set.seed(2023)
+clus <- rlg(data, d = c(4,4,4), alpha=0.05,nstart = 100, parallel = T)
+```
+
+```{r}
+classError(clus$cluster, label)$errorRate
+```
+
+```{r}
+table(clus$cluster, label)
+```
+
+Nos fijaremos en el grupo de los números 3. Vamos a representar el 3 "canónico", la media del cluster.
+
+```{r}
+image(t(matrix(clus$centers[,1],ncol=16,byrow=TRUE)[16:1,]))
+```
+
+Representamos los pesos (U)
+
+```{r}
+colors <- colorRampPalette(c("blue", "white", "red"))(10000)
+
+par(mfrow = c(1,4))
+for(i in 1:4){
+  image(t(matrix(clus$U[[1]][,i],ncol=16,byrow=TRUE)[16:1,]), col = colors, zlim = c(min(clus$U[[3]]), max(clus$U[[3]])))
+}
+par(mfrow = c(1,1))
+```
+
+Podemos expresar las observaciones como la suma ponderada de la media y las componentes.
+
+```{r}
+image(t(matrix(data[71,],ncol=16,byrow=TRUE)[16:1,]))
+```
+
+```{r}
+# Aproximacion con cada una de las componentes
+m_1 <- clus$centers[,1]
+x_c <- t(apply(data[label == 1,], 1, function(vec) vec - clus$centers[,1]))
+z_1 <- x_c %*% clus$U[[1]] # Scores de cada observacion
+
+# Aproximamos la obs 71 con 1, 2, 3 y 4 componentes
+image(t(matrix(
+  m_1 + z_1[71, 1] * clus$U[[1]]
+  ,ncol=16,byrow=TRUE)[16:1,]))
+image(t(matrix(
+  m_1 + z_1[71, 1] * clus$U[[1]][,1] + z_1[71, 2] * clus$U[[1]][,2]
+  ,ncol=16,byrow=TRUE)[16:1,]))
+image(t(matrix(
+  m_1 + z_1[71, 1] * clus$U[[1]][,1] + z_1[71, 2] * clus$U[[1]][,2] + z_1[71, 3] * clus$U[[1]][,3]
+  ,ncol=16,byrow=TRUE)[16:1,]))
+image(t(matrix(
+  m_1 + z_1[71, 1] * clus$U[[1]][,1] + z_1[71, 2] * clus$U[[1]][,2] + z_1[71, 3] * clus$U[[1]][,3] + z_1[71, 4] * clus$U[[1]][,4]
+  ,ncol=16,byrow=TRUE)[16:1,]))
+```
+
+Cada dimensión recoge una característica de los clusters, la primera la curva inferior, la segunda la superior, la tercera parece comprender los bordes verticales y la cuarta parece recoger la figura en su conjunto.
+
+Con todo ello, podemos representar los dos primeros scores para ver la "puntuación" asociada a cada observación.
+
+```{r}
+x_c <- t(apply(data[label == 1,], 1, function(vec) vec - clus$centers[,1]))
+z_1 <- x_c %*% clus$U[[1]]
+x_p <- x_c %*% clus$U[[1]] %*% t(clus$U[[1]])
+
+plot(z_1[,1], z_1[,2], xlab = "Score dimension 1", ylab = "Score dimension 2")
+abline(v=0, h=0, col="red", lty="dashed")
+identify(z_1[,1], z_1[,2])
+```
+
+Vamos a representar las observaciones marcadas, cada una debería tener una forma distinta, dentro de que todas representen números 3.
+
+```{r}
+image(t(matrix(data[548,],ncol=16,byrow=TRUE)[16:1,]))
+image(t(matrix(data[55,],ncol=16,byrow=TRUE)[16:1,]))
+image(t(matrix(data[289,],ncol=16,byrow=TRUE)[16:1,]))
+image(t(matrix(data[307 ,],ncol=16,byrow=TRUE)[16:1,]))
+```

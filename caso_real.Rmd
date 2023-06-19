@@ -278,7 +278,7 @@ par(mfrow = c(1,1))
 
 ```{r}
 set.seed(2023)
-clus <- rlg(data, d = c(4,4,4), alpha=0.05,nstart = 100, parallel = T)
+clus <- rlg(data, d = c(4,4,4), alpha=0.05,nstart = 1000, parallel = T)
 ```
 
 ```{r}
@@ -289,10 +289,15 @@ classError(clus$cluster, label)$errorRate
 table(clus$cluster, label)
 ```
 
+```{r}
+lab.3 <- 1
+```
+
+
 Nos fijaremos en el grupo de los números 3. Vamos a representar el 3 "canónico", la media del cluster.
 
 ```{r}
-image(t(matrix(clus$centers[,1],ncol=16,byrow=TRUE)[16:1,]))
+image(t(matrix(clus$centers[,lab.3],ncol=16,byrow=TRUE)[16:1,]))
 ```
 
 Representamos los pesos (U)
@@ -302,7 +307,7 @@ colors <- colorRampPalette(c("blue", "white", "red"))(10000)
 
 par(mfrow = c(1,4))
 for(i in 1:4){
-  image(t(matrix(clus$U[[1]][,i],ncol=16,byrow=TRUE)[16:1,]), col = colors, zlim = c(min(clus$U[[3]]), max(clus$U[[3]])))
+  image(t(matrix(clus$U[[lab.3]][,i],ncol=16,byrow=TRUE)[16:1,]), col = colors, zlim = c(min(clus$U[[lab.3]]), max(clus$U[[lab.3]])))
 }
 par(mfrow = c(1,1))
 ```
@@ -314,23 +319,28 @@ image(t(matrix(data[71,],ncol=16,byrow=TRUE)[16:1,]))
 ```
 
 ```{r}
+z_1[71,]
+```
+
+
+```{r}
 # Aproximacion con cada una de las componentes
-m_1 <- clus$centers[,1]
-x_c <- t(apply(data[label == 1,], 1, function(vec) vec - clus$centers[,1]))
-z_1 <- x_c %*% clus$U[[1]] # Scores de cada observacion
+m_1 <- clus$centers[,lab.3]
+x_c <- t(apply(data[label == lab.3,], 1, function(vec) vec - clus$centers[,lab.3]))
+z_1 <- x_c %*% clus$U[[lab.3]] # Scores de cada observacion
 
 # Aproximamos la obs 71 con 1, 2, 3 y 4 componentes
 image(t(matrix(
-  m_1 + z_1[71, 1] * clus$U[[1]]
+  m_1 + z_1[71, lab.3] * clus$U[[lab.3]]
   ,ncol=16,byrow=TRUE)[16:1,]))
 image(t(matrix(
-  m_1 + z_1[71, 1] * clus$U[[1]][,1] + z_1[71, 2] * clus$U[[1]][,2]
+  m_1 + z_1[71, lab.3] * clus$U[[lab.3]][,1] + z_1[71, 2] * clus$U[[lab.3]][,2]
   ,ncol=16,byrow=TRUE)[16:1,]))
 image(t(matrix(
-  m_1 + z_1[71, 1] * clus$U[[1]][,1] + z_1[71, 2] * clus$U[[1]][,2] + z_1[71, 3] * clus$U[[1]][,3]
+  m_1 + z_1[71, lab.3] * clus$U[[lab.3]][,1] + z_1[71, 2] * clus$U[[lab.3]][,2] + z_1[71, 3] * clus$U[[lab.3]][,3]
   ,ncol=16,byrow=TRUE)[16:1,]))
 image(t(matrix(
-  m_1 + z_1[71, 1] * clus$U[[1]][,1] + z_1[71, 2] * clus$U[[1]][,2] + z_1[71, 3] * clus$U[[1]][,3] + z_1[71, 4] * clus$U[[1]][,4]
+  m_1 + z_1[71, lab.3] * clus$U[[lab.3]][,1] + z_1[71, 2] * clus$U[[lab.3]][,2] + z_1[71, 3] * clus$U[[lab.3]][,3] + z_1[71, 4] * clus$U[[lab.3]][,4]
   ,ncol=16,byrow=TRUE)[16:1,]))
 ```
 
@@ -339,20 +349,48 @@ Cada dimensión recoge una característica de los clusters, la primera la curva 
 Con todo ello, podemos representar los dos primeros scores para ver la "puntuación" asociada a cada observación.
 
 ```{r}
-x_c <- t(apply(data[label == 1,], 1, function(vec) vec - clus$centers[,1]))
-z_1 <- x_c %*% clus$U[[1]]
-x_p <- x_c %*% clus$U[[1]] %*% t(clus$U[[1]])
+x_c <- t(apply(data[label == lab.3,], 1, function(vec) vec - clus$centers[,lab.3]))
+z_1 <- x_c %*% clus$U[[lab.3]]
+x_p <- x_c %*% clus$U[[lab.3]] %*% t(clus$U[[lab.3]])
 
 plot(z_1[,1], z_1[,2], xlab = "Score dimension 1", ylab = "Score dimension 2")
 abline(v=0, h=0, col="red", lty="dashed")
-identify(z_1[,1], z_1[,2])
+# identify(z_1[,1], z_1[,2])
 ```
 
-Vamos a representar las observaciones marcadas, cada una debería tener una forma distinta, dentro de que todas representen números 3.
+Podemos representar observaciones correspondientes a scores "extremos" en cada dimensión.
 
 ```{r}
-image(t(matrix(data[548,],ncol=16,byrow=TRUE)[16:1,]))
-image(t(matrix(data[55,],ncol=16,byrow=TRUE)[16:1,]))
-image(t(matrix(data[289,],ncol=16,byrow=TRUE)[16:1,]))
-image(t(matrix(data[307 ,],ncol=16,byrow=TRUE)[16:1,]))
+image(t(matrix(
+  clus$centers[,lab.3] - 6 * clus$U[[lab.3]][,1] + 6 * clus$U[[lab.3]][,2]
+  ,ncol=16,byrow=TRUE)[16:1,]))
+
+image(t(matrix(
+  clus$centers[,lab.3] + 0 * clus$U[[lab.3]][,1] + 6 * clus$U[[lab.3]][,2]
+  ,ncol=16,byrow=TRUE)[16:1,]))
+
+image(t(matrix(
+  clus$centers[,lab.3] + 6 * clus$U[[lab.3]][,1] + 6 * clus$U[[lab.3]][,2]
+  ,ncol=16,byrow=TRUE)[16:1,]))
+
+image(t(matrix(
+  clus$centers[,lab.3] - 6 * clus$U[[lab.3]][,1] + 0 * clus$U[[lab.3]][,2]
+  ,ncol=16,byrow=TRUE)[16:1,]))
+
+image(t(matrix(
+  clus$centers[,lab.3] + 6 * clus$U[[lab.3]][,1] + 0 * clus$U[[lab.3]][,2]
+  ,ncol=16,byrow=TRUE)[16:1,]))
+
+image(t(matrix(
+  clus$centers[,lab.3] - 6 * clus$U[[lab.3]][,1] - 6 * clus$U[[lab.3]][,2]
+  ,ncol=16,byrow=TRUE)[16:1,]))
+
+image(t(matrix(
+  clus$centers[,lab.3] + 0 * clus$U[[lab.3]][,1] - 6 * clus$U[[lab.3]][,2]
+  ,ncol=16,byrow=TRUE)[16:1,]))
+
+image(t(matrix(
+  clus$centers[,lab.3] + 6 * clus$U[[lab.3]][,1] - 6 * clus$U[[lab.3]][,2]
+  ,ncol=16,byrow=TRUE)[16:1,]))
+
 ```
